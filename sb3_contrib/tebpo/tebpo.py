@@ -18,11 +18,13 @@ from sb3_contrib.common.utils import conjugate_gradient_solver, flat_grad
 from sb3_contrib.trpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
 
 
-class TRPO(OnPolicyAlgorithm):
+class TEBPO(OnPolicyAlgorithm):
     """
-    Trust Region Policy Optimization (TRPO)
+    Taylor-Expansion-Based Policy Optimization (TEBPO)
 
     Paper: https://arxiv.org/abs/1502.05477
+    <Add new TEBPO writeup/paper>
+
     Code: This implementation borrows code from OpenAI Spinning Up (https://github.com/openai/spinningup/)
     and Stable Baselines (TRPO from https://github.com/hill-a/stable-baselines)
 
@@ -360,7 +362,8 @@ class TRPO(OnPolicyAlgorithm):
         # Critic update
         for _ in range(self.n_critic_updates):
             for rollout_data in self.rollout_buffer.get(self.batch_size):
-                values_pred = self.policy.predict_values(rollout_data.observations)
+                values_pred, value_grads_pred = self.policy.predict_values_with_gradients(rollout_data.observations)
+                # Where to use value_grads_pred?
                 value_loss = F.mse_loss(rollout_data.returns, values_pred.flatten())
                 value_losses.append(value_loss.item())
 
