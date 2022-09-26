@@ -211,7 +211,14 @@ class TEBPO(OnPolicyAlgorithm):
                 # If the parameter impacts the KL divergence (i.e. the policy)
                 # we compute the gradient of the policy objective w.r.t to the parameter
                 # this avoids computing the gradient if it's not going to be used in the conjugate gradient step
-                policy_objective_grad, *_ = th.autograd.grad(policy_objective, param, retain_graph=True, only_inputs=True)
+                policy_objective_grad_term_a, *_ = th.autograd.grad(policy_objective, param, retain_graph=True, only_inputs=True)
+                # TODO: Replace with our own gradients
+                policy_objective_grad_term_b = self.policy.forward_with_grads(
+                    obs=self.rollout_buffer.get(batch_size=100),
+                    deterministic=True
+                )[2]
+
+                policy_objective_grad = policy_objective_grad_term_a + policy_objective_grad_term_b
 
                 grad_shape.append(kl_param_grad.shape)
                 grad_kl.append(kl_param_grad.reshape(-1))
@@ -236,6 +243,7 @@ class TEBPO(OnPolicyAlgorithm):
         kl_divergences = []
         line_search_results = []
         value_losses = []
+        value_gradient_losses = []
 
         # This will only loop once (get all data in one go)
         for rollout_data in self.rollout_buffer.get(batch_size=None):
@@ -363,12 +371,17 @@ class TEBPO(OnPolicyAlgorithm):
         for _ in range(self.n_critic_updates):
             for rollout_data in self.rollout_buffer.get(self.batch_size):
                 values_pred, value_grads_pred = self.policy.predict_values_with_gradients(rollout_data.observations)
-                # Where to use value_grads_pred?
+
                 value_loss = F.mse_loss(rollout_data.returns, values_pred.flatten())
                 value_losses.append(value_loss.item())
 
+                # Replace returns without appropriate returns
+                value_gradient_loss = F.mse_loss(rollout_data.returns, value_grads_pred.flatten())
+                value_gradient_losses.append(value_gradient_loss.item())
+
                 self.policy.optimizer.zero_grad()
                 value_loss.backward()
+                value_gradient_loss.backward()
                 # Removing gradients of parameters shared with the actor
                 # otherwise it defeats the purposes of the KL constraint
                 for param in actor_params:

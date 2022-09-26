@@ -131,7 +131,7 @@ class ActorCriticPolicyWithGradients(ActorCriticPolicy):
         return actions, values, log_prob
 
     def forward_with_gradients(self, obs: th.Tensor,
-                               deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+                               deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """
         Forward pass in all the networks (actor, critic, and critic-gradient)
 
