@@ -212,11 +212,13 @@ class TEBPO(OnPolicyAlgorithm):
                 # we compute the gradient of the policy objective w.r.t to the parameter
                 # this avoids computing the gradient if it's not going to be used in the conjugate gradient step
                 policy_objective_grad_term_a, *_ = th.autograd.grad(policy_objective, param, retain_graph=True, only_inputs=True)
-                # TODO: Replace with our own gradients
-                policy_objective_grad_term_b = self.policy.forward_with_grads(
-                    obs=self.rollout_buffer.get(batch_size=100),
-                    deterministic=True
-                )[2]
+                # TODO: Figure out the last state, dones
+                policy_objective_grad_term_b = self.rollout_buffer.compute_returns_and_advantage(
+                    self.policy.forward_with_grads(
+                        obs=self.rollout_buffer.get(batch_size=self.batch_size),
+                        deterministic=True
+                    )[2]
+                )
 
                 policy_objective_grad = policy_objective_grad_term_a + policy_objective_grad_term_b
 
