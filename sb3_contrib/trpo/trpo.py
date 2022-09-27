@@ -233,7 +233,6 @@ class TRPO(OnPolicyAlgorithm):
         policy_objective_values = []
         kl_divergences = []
         line_search_results = []
-        value_losses = []
 
         # This will only loop once (get all data in one go)
         for rollout_data in self.rollout_buffer.get(batch_size=None):
@@ -270,7 +269,8 @@ class TRPO(OnPolicyAlgorithm):
 
             advantages = rollout_data.advantages
             if self.normalize_advantage:
-                advantages = (advantages - advantages.mean()) / (rollout_data.advantages.std() + 1e-8)
+                advantages = (advantages - advantages.mean()) \
+                    / (rollout_data.advantages.std() + 1e-8)
 
             # ratio between old and new policy, should be one at the first iteration
             ratio = th.exp(log_prob - rollout_data.old_log_prob)
@@ -284,10 +284,12 @@ class TRPO(OnPolicyAlgorithm):
             # Surrogate & KL gradient
             self.policy.optimizer.zero_grad()
 
-            actor_params, policy_objective_gradients, grad_kl, grad_shape = self._compute_actor_grad(kl_div, policy_objective)
+            actor_params, policy_objective_gradients, grad_kl, grad_shape = \
+                self._compute_actor_grad(kl_div, policy_objective)
 
             # Hessian-vector dot product function used in the conjugate gradient step
-            hessian_vector_product_fn = partial(self.hessian_vector_product, actor_params, grad_kl)
+            hessian_vector_product_fn = partial(self.hessian_vector_product,
+                                                actor_params, grad_kl)
 
             # Computing search direction
             search_direction = conjugate_gradient_solver(
@@ -357,23 +359,11 @@ class TRPO(OnPolicyAlgorithm):
                     policy_objective_values.append(new_policy_objective.item())
                     kl_divergences.append(kl_div.item())
 
-        # Critic update
-        for _ in range(self.n_critic_updates):
-            for rollout_data in self.rollout_buffer.get(self.batch_size):
-                values_pred = self.policy.predict_values(rollout_data.observations)
-                value_loss = F.mse_loss(rollout_data.returns, values_pred.flatten())
-                value_losses.append(value_loss.item())
-
-                self.policy.optimizer.zero_grad()
-                value_loss.backward()
-                # Removing gradients of parameters shared with the actor
-                # otherwise it defeats the purposes of the KL constraint
-                for param in actor_params:
-                    param.grad = None
-                self.policy.optimizer.step()
-
+        value_losses = self.update_critic(actor_params)
         self._n_updates += 1
-        explained_var = explained_variance(self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten())
+        explained_var = explained_variance(
+            self.rollout_buffer.values.flatten(),
+            self.rollout_buffer.returns.flatten())
 
         # Logs
         self.logger.record("train/policy_objective", np.mean(policy_objective_values))
@@ -385,6 +375,27 @@ class TRPO(OnPolicyAlgorithm):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+
+    def update_critic(self, actor_params):
+        # Critic update
+        value_losses = []
+        for _ in range(self.n_critic_updates):
+            for rollout_data in self.rollout_buffer.get(self.batch_size):
+                value_loss = self.value_loss(rollout_data)
+                value_losses.append(value_loss.item())
+
+                self.policy.optimizer.zero_grad()
+                value_loss.backward()
+                # Removing gradients of parameters shared with the actor
+                # otherwise it defeats the purposes of the KL constraint
+                for param in actor_params:
+                    param.grad = None
+                self.policy.optimizer.step()
+        return value_losses
+
+    def value_loss(self, data):
+        values_pred = self.policy.predict_values(data.observations)
+        return F.mse_loss(data.returns, values_pred.flatten())
 
     def hessian_vector_product(
         self, params: List[nn.Parameter], grad_kl: th.Tensor, vector: th.Tensor, retain_graph: bool = True
