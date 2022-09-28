@@ -5,7 +5,9 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch as th
+from functorch import vmap, make_functional, grad
 from gym import spaces
+from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.distributions import kl_divergence
 from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, RolloutBufferSamples, Schedule
@@ -13,6 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from sb3_contrib.trpo.trpo import TRPO
+from sb3_contrib.tebpo.actor_critic_policy_with_gradients import ActorCriticPolicyWithGradients
 
 
 class TEBPO(TRPO):
@@ -65,6 +68,12 @@ class TEBPO(TRPO):
         Setting it to auto, the code will be run on the GPU if possible.
     :param _init_setup_model: Whether or not to build the network at the creation of the instance
     """
+    policy_aliases: Dict[str, Type[BasePolicy]] = {
+        "MlpPolicy": ActorCriticPolicyWithGradients,
+        # "CnnPolicy": ActorCriticCnnPolicy,
+        # "MultiInputPolicy": MultiInputActorCriticPolicy,
+    }
+
     def __init__(
         self,
         policy: Union[str, Type[ActorCriticPolicy]],
@@ -76,28 +85,50 @@ class TEBPO(TRPO):
         super(TEBPO, self)._setup_model()
 
     def value_loss(self, data):
-        value_loss = super(TEBPO, self).value_loss(data)
-        value_grad_targets = self.compute_returns_and_advantage
+        actions, value_preds, value_grad_preds, log_probs = \
+            self.policy.forward_with_gradients(data.observations)
+        value_loss = F.mse_loss(data.returns, value_preds.flatten())
+        th.autograd.functional.Jacobian(log_probs, )
 
-    def compute_returns_and_advantage(self, last_values: th.Tensor, dones: np.ndarray) -> None:
+        # Compute per-sample policy gradients
+        func_model, params = make_functional(self.policy)
+        def get_log_probs(params, obs, acts):
+            return func_model(params, obs).log_prob(acts)
+        reward_weights = get_log_probs(params, obs, acts)
+        grads = vmap(grad(get_log_probs), in_dims=(0, None, None))(
+            data.observations, data.actions)
+
+        value_grad_targets = self.compute_returns_and_advantage()
+        value_grad_loss = F.mse_loss(value_grad_targets, value_grad_preds)
+        return value_loss + value_grad_loss
+
+    def compute_returns_and_advantage(self,
+                                      buffer: RolloutBuffer,
+                                      last_values: th.Tensor,
+                                      dones: np.ndarray,
+                                      weights: np.ndarray,
+                                      values: np.ndarray) -> np.ndarray:
         "See documentation in stable_baselines3.buffers.RolloutBuffer"
         # Convert to numpy
         last_values = last_values.clone().cpu().numpy().flatten()
 
         last_gae_lam = 0
-        for step in reversed(range(self.buffer_size)):
-            if step == self.buffer_size - 1:
+        advantages = np.zeros(buffer.buffer_size)
+        for step in reversed(range(buffer.buffer_size)):
+            if step == buffer.buffer_size - 1:
                 next_non_terminal = 1.0 - dones
                 next_values = last_values
             else:
-                next_non_terminal = 1.0 - self.episode_starts[step + 1]
-                next_values = self.values[step + 1]
-            delta = self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step]
-            last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
-            self.advantages[step] = last_gae_lam
+                next_non_terminal = 1.0 - buffer.episode_starts[step + 1]
+                next_values = values[step + 1]
+            delta = (weights * buffer.rewards[step]
+                     + buffer.gamma * next_values * next_non_terminal
+                     - values[step])
+            last_gae_lam = delta + buffer.gamma * buffer.gae_lambda * next_non_terminal * last_gae_lam
+            advantages[step] = last_gae_lam
         # TD(lambda) estimator, see Github PR #375 or "Telescoping in TD(lambda)"
         # in David Silver Lecture 4: https://www.youtube.com/watch?v=PnHCvfgC_ZA
-        self.returns = self.advantages + self.values
+        return advantages + values
 
     def _compute_actor_grad(
         self, kl_div: th.Tensor, policy_objective: th.Tensor

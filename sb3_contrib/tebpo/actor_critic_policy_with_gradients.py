@@ -2,6 +2,7 @@ import gym
 import numpy as np
 import torch as th
 from torch import nn
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 from stable_baselines3.common.policies import ActorCriticPolicy
 
@@ -98,16 +99,13 @@ class ActorCriticPolicyWithGradients(ActorCriticPolicy):
         # Reinstantiate optimizer in order to pass on parameters from the value-gradient network
         self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
 
-    def predict_values_with_gradients(self, obs: th.Tensor) -> th.Tensor:
+    def predict_values_with_gradients(self, obs: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """
         Get estimates of the value function and gradient of the value function, according to the current policy
         given the observations.
-
         """
-
         features = self.extract_features(obs)
         latent_vf = self.mlp_extractor.forward_critic(features)
-
         return self.value_net(latent_vf), self.value_grad_net(latent_vf)
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
