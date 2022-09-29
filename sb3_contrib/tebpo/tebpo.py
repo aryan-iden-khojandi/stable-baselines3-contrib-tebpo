@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch as th
-from functorch import vmap, make_functional, grad
 from gym import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.distributions import kl_divergence
@@ -13,6 +12,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, RolloutBufferSamples, Schedule
 from torch import nn
 from torch.nn import functional as F
+from sb3_contrib.tebpo.tensor_buffer import ValueGradientRewardsRolloutBuffer
 
 from sb3_contrib.trpo.trpo import TRPO
 from sb3_contrib.tebpo.actor_critic_policy_with_gradients import ActorCriticPolicyWithGradients
@@ -83,24 +83,15 @@ class TEBPO(TRPO):
 
     def _setup_model(self):
         super(TEBPO, self)._setup_model()
-
-    def value_loss(self, data):
-        actions, value_preds, value_grad_preds, log_probs = \
-            self.policy.forward_with_gradients(data.observations)
-        value_loss = F.mse_loss(data.returns, value_preds.flatten())
-
-        # Compute per-sample policy gradients
-        func_model, params = make_functional(self.policy)
-        def get_log_probs(params, obs, acts):
-            return func_model(params, obs).log_prob(acts)
-        reward_weights = get_log_probs(params, obs, acts)
-        grads = vmap(grad(get_log_probs), in_dims=(0, None, None))(
-            data.observations, data.actions)
-
-        value_grad_targets = self.compute_returns_and_advantage(
-            self.rollout_buffer, grads, value_grad_preds)
-        value_grad_loss = F.mse_loss(value_grad_targets, value_grad_preds)
-        return value_loss + value_grad_loss
+        self.rollout_buffer = ValueGradientRewardsRolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            self.policy,
+            device=self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs)
 
     @staticmethod
     def compute_returns_and_advantage(buffer: RolloutBuffer,

@@ -92,7 +92,8 @@ class ActorCriticPolicyWithGradients(ActorCriticPolicy):
                 num_policy_edges = sum(self.net_arch)
         else:
             raise
-        self.value_grad_net = nn.Linear(self.mlp_extractor.latent_dim_vf, num_policy_edges)
+        self.value_net = nn.Linear(self.mlp_extractor.latent_dim_vf,
+                                   num_policy_edges + 1)
         # Init weights: use orthogonal initialization
         # with small initial weight for the output
 
@@ -103,6 +104,7 @@ class ActorCriticPolicyWithGradients(ActorCriticPolicy):
         """
         Get estimates of the value function and gradient of the value function, according to the current policy
         given the observations.
+
         """
         features = self.extract_features(obs)
         latent_vf = self.mlp_extractor.forward_critic(features)
