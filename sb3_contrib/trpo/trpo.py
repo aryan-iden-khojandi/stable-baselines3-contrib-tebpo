@@ -1,7 +1,7 @@
 import copy
 import warnings
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union, Callable
 
 import numpy as np
 import torch as th
@@ -248,38 +248,14 @@ class TRPO(OnPolicyAlgorithm):
                     None,  # returns, not used here
                 )
 
-            actions = rollout_data.actions
-            if isinstance(self.action_space, spaces.Discrete):
-                # Convert discrete action from float to long
-                actions = rollout_data.actions.long().flatten()
-
             # Re-sample the noise matrix because the log_std has changed
             if self.use_sde:
                 # batch_size is only used for the value function
                 self.policy.reset_noise(actions.shape[0])
 
-            with th.no_grad():
-                # Note: is copy enough, no need for deepcopy?
-                # If using gSDE and deepcopy, we need to use `old_distribution.distribution`
-                # directly to avoid PyTorch errors.
-                old_distribution = copy.copy(self.policy.get_distribution(rollout_data.observations))
-
-            distribution = self.policy.get_distribution(rollout_data.observations)
-            log_prob = distribution.log_prob(actions)
-
-            advantages = rollout_data.advantages
-            if self.normalize_advantage:
-                advantages = (advantages - advantages.mean()) \
-                    / (rollout_data.advantages.std() + 1e-8)
-
-            # ratio between old and new policy, should be one at the first iteration
-            ratio = th.exp(log_prob - rollout_data.old_log_prob)
-
-            # surrogate policy objective
-            policy_objective = (advantages * ratio).mean()
-
             # KL divergence
-            kl_div = kl_divergence(distribution, old_distribution).mean()
+            obj_and_kl_fn = self.get_objective_and_kl_fn(self.policy, rollout_data)
+            policy_objective, kl_div = obj_and_kl_fn(self.policy)
 
             # Surrogate & KL gradient
             self.policy.optimizer.zero_grad()
@@ -301,63 +277,32 @@ class TRPO(OnPolicyAlgorithm):
             # Maximal step length
             line_search_max_step_size = 2 * self.target_kl
             line_search_max_step_size /= th.matmul(
-                search_direction, hessian_vector_product_fn(search_direction, retain_graph=False)
+                search_direction,
+                hessian_vector_product_fn(search_direction, retain_graph=False)
             )
             line_search_max_step_size = th.sqrt(line_search_max_step_size)
-
-            line_search_backtrack_coeff = 1.0
-            original_actor_params = [param.detach().clone() for param in actor_params]
+            original_actor_params = [param.detach().clone()
+                                     for param in actor_params]
 
             is_line_search_success = False
             with th.no_grad():
                 # Line-search (backtracking)
-                for _ in range(self.line_search_max_iter):
-
-                    start_idx = 0
-                    # Applying the scaled step direction
-                    for param, original_param, shape in zip(actor_params, original_actor_params, grad_shape):
-                        n_params = param.numel()
-                        param.data = (
-                            original_param.data
-                            + line_search_backtrack_coeff
-                            * line_search_max_step_size
-                            * search_direction[start_idx : (start_idx + n_params)].view(shape)
-                        )
-                        start_idx += n_params
-
-                    # Recomputing the policy log-probabilities
-                    distribution = self.policy.get_distribution(rollout_data.observations)
-                    log_prob = distribution.log_prob(actions)
-
-                    # New policy objective
-                    ratio = th.exp(log_prob - rollout_data.old_log_prob)
-                    new_policy_objective = (advantages * ratio).mean()
-
-                    # New KL-divergence
-                    kl_div = kl_divergence(distribution, old_distribution).mean()
-
-                    # Constraint criteria:
-                    # we need to improve the surrogate policy objective
-                    # while being close enough (in term of kl div) to the old policy
-                    if (kl_div < self.target_kl) and (new_policy_objective > policy_objective):
-                        is_line_search_success = True
-                        break
-
-                    # Reducing step size if line-search wasn't successful
-                    line_search_backtrack_coeff *= self.line_search_shrinking_factor
-
+                linesearch_obj_fn = self.get_linesearch_obj_fn(
+                    actor_params, original_actor_params, grad_shape,
+                    search_direction, obj_and_kl_fn)
+                is_line_search_success, new_policy, new_obj, kl = self.linesearch(
+                    linesearch_obj_fn, line_search_max_step_size)
                 line_search_results.append(is_line_search_success)
 
                 if not is_line_search_success:
                     # If the line-search wasn't successful we revert to the original parameters
                     for param, original_param in zip(actor_params, original_actor_params):
                         param.data = original_param.data.clone()
-
                     policy_objective_values.append(policy_objective.item())
                     kl_divergences.append(0)
                 else:
-                    policy_objective_values.append(new_policy_objective.item())
-                    kl_divergences.append(kl_div.item())
+                    policy_objective_values.append(new_obj.item())
+                    kl_divergences.append(kl.item())
 
         value_losses = self.update_critic(actor_params)
         self._n_updates += 1
@@ -373,8 +318,82 @@ class TRPO(OnPolicyAlgorithm):
         self.logger.record("train/is_line_search_success", np.mean(line_search_results))
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
-
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+
+    def get_objective_and_kl_fn(self, policy, data):
+        """
+        Returns a closure that accepts a policy, and returns the objective
+        value and KL divergence from the original policy.
+        """
+        advantages = data.advantages
+        if self.normalize_advantage:
+            advantages = (advantages - advantages.mean()) \
+                / (data.advantages.std() + 1e-8)
+
+        with th.no_grad():
+            # Note: is copy enough, no need for deepcopy?
+            # If using gSDE and deepcopy, we need to use `old_distribution.distribution`
+            # directly to avoid PyTorch errors.
+            old_distribution = copy.copy(
+                policy.get_distribution(data.observations))
+
+        if isinstance(self.action_space, spaces.Discrete):
+            # Convert discrete action from float to long
+            actions = data.actions.long().flatten()
+
+        def objective_and_kl_fn(policy):
+            distribution = policy.get_distribution(data.observations)
+            log_prob = distribution.log_prob(actions)
+            ratio = th.exp(log_prob - data.old_log_prob)
+            kl_div = kl_divergence(distribution, old_distribution).mean()
+            obj = (advantages * ratio).mean()
+            return obj, kl_div
+
+        return objective_and_kl_fn
+
+    def get_linesearch_obj_fn(self, actor_params: th.Tensor,
+                              original_params:th.Tensor,
+                              grad_shape: List,
+                              search_direction: th.Tensor,
+                              obj_and_kl_fn: Callable) -> Callable:
+        """
+        Returns a closure f(coeff) that evaluates obj and kl for the policy
+        original_params + search_direction * coeff
+        """
+        def linesearch_obj_fn(coeff: float):
+            "Return a tuple of policy, obj, constraint"
+            flat_direction = coeff * search_direction
+            self.update_params(
+                actor_params, original_params, grad_shape, flat_direction)
+            obj, kl = obj_and_kl_fn(self.policy)
+            return (self.policy, obj, kl)
+        return linesearch_obj_fn
+
+    def update_params(self, actor_params, original_params, grad_shape,
+                      flat_direction):
+        start_idx = 0
+        # Applying the scaled step direction
+        for param, original_param, shape in zip(
+                actor_params, original_params, grad_shape):
+            n_params = param.numel()
+            param.data = (
+                original_param.data
+                + flat_direction[start_idx:(start_idx + n_params)].view(shape)
+            )
+            start_idx += n_params
+
+    def linesearch(self, obj_fn, max_step_size):
+        success = False
+        step_size = max_step_size
+        _, init_obj, _ = obj_fn(0.)
+        for _ in range(self.line_search_max_iter):
+            new_policy, new_obj, new_kl = obj_fn(step_size)
+            if ((new_kl < self.target_kl) and (new_obj > init_obj)):
+                success = True
+                break
+            else:
+                step_size *= self.line_search_shrinking_factor
+        return success, new_policy, new_obj, new_kl
 
     def update_critic(self, actor_params):
         # Critic update
