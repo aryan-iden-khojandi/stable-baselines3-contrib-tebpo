@@ -88,7 +88,6 @@ class TEBPO(TRPO):
         actions, value_preds, value_grad_preds, log_probs = \
             self.policy.forward_with_gradients(data.observations)
         value_loss = F.mse_loss(data.returns, value_preds.flatten())
-        th.autograd.functional.Jacobian(log_probs, )
 
         # Compute per-sample policy gradients
         func_model, params = make_functional(self.policy)
@@ -98,33 +97,32 @@ class TEBPO(TRPO):
         grads = vmap(grad(get_log_probs), in_dims=(0, None, None))(
             data.observations, data.actions)
 
-        value_grad_targets = self.compute_returns_and_advantage()
+        value_grad_targets = self.compute_returns_and_advantage(
+            self.rollout_buffer, grads, value_grad_preds)
         value_grad_loss = F.mse_loss(value_grad_targets, value_grad_preds)
         return value_loss + value_grad_loss
 
-    def compute_returns_and_advantage(self,
-                                      buffer: RolloutBuffer,
-                                      last_values: th.Tensor,
-                                      dones: np.ndarray,
+    @staticmethod
+    def compute_returns_and_advantage(buffer: RolloutBuffer,
+                                      last_values: np.ndarray,
                                       weights: np.ndarray,
                                       values: np.ndarray) -> np.ndarray:
         "See documentation in stable_baselines3.buffers.RolloutBuffer"
         # Convert to numpy
-        last_values = last_values.clone().cpu().numpy().flatten()
-
         last_gae_lam = 0
         advantages = np.zeros(buffer.buffer_size)
         for step in reversed(range(buffer.buffer_size)):
             if step == buffer.buffer_size - 1:
-                next_non_terminal = 1.0 - dones
-                next_values = last_values
+                next_non_terminal = 1.0 - buffer.dones
+                next_values = buffer.last_values
             else:
                 next_non_terminal = 1.0 - buffer.episode_starts[step + 1]
                 next_values = values[step + 1]
             delta = (weights * buffer.rewards[step]
                      + buffer.gamma * next_values * next_non_terminal
                      - values[step])
-            last_gae_lam = delta + buffer.gamma * buffer.gae_lambda * next_non_terminal * last_gae_lam
+            last_gae_lam = (delta + buffer.gamma * buffer.gae_lambda
+                            * next_non_terminal * last_gae_lam)
             advantages[step] = last_gae_lam
         # TD(lambda) estimator, see Github PR #375 or "Telescoping in TD(lambda)"
         # in David Silver Lecture 4: https://www.youtube.com/watch?v=PnHCvfgC_ZA
@@ -132,7 +130,8 @@ class TEBPO(TRPO):
 
     def _compute_actor_grad(
         self, kl_div: th.Tensor, policy_objective: th.Tensor
-    ) -> Tuple[List[nn.Parameter], th.Tensor, th.Tensor, List[Tuple[int, ...]]]:
+    ) -> Tuple[List[nn.Parameter], th.Tensor,
+               th.Tensor, List[Tuple[int, ...]]]:
         """
         Compute actor gradients for kl div and surrogate objectives.
 
@@ -140,17 +139,22 @@ class TEBPO(TRPO):
         :param policy_objective: The surrogate objective ("classic" policy gradient)
         :return: List of actor params, gradients and gradients shape.
         """
-        # This is necessary because not all the parameters in the policy have gradients w.r.t. the KL divergence
+        # This is necessary because not all the parameters in the policy
+        # have gradients w.r.t. the KL divergence
         # The policy objective is also called surrogate objective
         policy_objective_gradients = []
         # Contains the gradients of the KL divergence
         grad_kl = []
-        # Contains the shape of the gradients of the KL divergence w.r.t each parameter
-        # This way the flattened gradient can be reshaped back into the original shapes and applied to
+        # Contains the shape of the gradients of the KL divergence w.r.t
+        # each parameter
+        # This way the flattened gradient can be reshaped back into the
+        # original shapes and applied to
         # the parameters
         grad_shape = []
-        # Contains the parameters which have non-zeros KL divergence gradients
-        # The list is used during the line-search to apply the step to each parameters
+        # Contains the parameters which have non-zeros KL divergence
+        # gradients
+        # The list is used during the line-search to apply the step to
+        # each parameters
         actor_params = []
 
         for name, param in self.policy.named_parameters():
@@ -159,7 +163,8 @@ class TEBPO(TRPO):
             if "value" in name:
                 continue
 
-            # For each parameter we compute the gradient of the KL divergence w.r.t to that parameter
+            # For each parameter we compute the gradient of the KL
+            # divergence w.r.t to that parameter
             kl_param_grad, *_ = th.autograd.grad(
                 kl_div,
                 param,
@@ -168,31 +173,41 @@ class TEBPO(TRPO):
                 allow_unused=True,
                 only_inputs=True,
             )
-            # If the gradient is not zero (not None), we store the parameter in the actor_params list
-            # and add the gradient and its shape to grad_kl and grad_shape respectively
+            # If the gradient is not zero (not None), we store the
+            # parameter in the actor_params list
+            # and add the gradient and its shape to grad_kl and
+            # grad_shape respectively
             if kl_param_grad is not None:
-                # If the parameter impacts the KL divergence (i.e. the policy)
-                # we compute the gradient of the policy objective w.r.t to the parameter
-                # this avoids computing the gradient if it's not going to be used in the conjugate gradient step
+                # If the parameter impacts the KL divergence (i.e. the
+                # policy) we compute the gradient of the policy objective
+                # w.r.t to the parameter this avoids computing the
+                # gradient if it's not going to be used in the conjugate
+                # gradient step
                 policy_objective_grad_term_a, *_ = th.autograd.grad(
                     policy_objective, param,
                     retain_graph=True, only_inputs=True)
                 # TODO: Figure out the last state, dones
+                obs = self.rollout_buffer.get(batch_size=self.batch_size)
+
                 policy_objective_grad_term_b = \
                     self.rollout_buffer.compute_returns_and_advantage(
                         self.policy.forward_with_grads(
-                            obs=self.rollout_buffer.get(batch_size=self.batch_size),
-                            deterministic=True
+                            obs=obs, deterministic=True
                         )[2])
 
-                policy_objective_grad = policy_objective_grad_term_a + policy_objective_grad_term_b
+                policy_objective_grad = (policy_objective_grad_term_a
+                                         + policy_objective_grad_term_b)
 
                 grad_shape.append(kl_param_grad.shape)
                 grad_kl.append(kl_param_grad.reshape(-1))
-                policy_objective_gradients.append(policy_objective_grad.reshape(-1))
+                policy_objective_gradients.append(
+                    policy_objective_grad.reshape(-1))
                 actor_params.append(param)
 
         # Gradients are concatenated before the conjugate gradient step
         policy_objective_gradients = th.cat(policy_objective_gradients)
         grad_kl = th.cat(grad_kl)
-        return actor_params, policy_objective_gradients, grad_kl, grad_shape
+        return (actor_params,
+                policy_objective_gradients,
+                grad_kl,
+                grad_shape)
