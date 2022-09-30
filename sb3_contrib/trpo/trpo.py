@@ -16,6 +16,8 @@ from torch.nn import functional as F
 
 from sb3_contrib.common.utils import conjugate_gradient_solver, flat_grad
 from sb3_contrib.trpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
+from sb3_contrib.trpo.utils import \
+    get_flat_grads, get_flat_params, set_flat_params, is_actor
 
 
 class TRPO(OnPolicyAlgorithm):
@@ -165,9 +167,11 @@ class TRPO(OnPolicyAlgorithm):
         if _init_setup_model:
             self._setup_model()
 
-    def _compute_actor_grad(
-        self, kl_div: th.Tensor, policy_objective: th.Tensor
-    ) -> Tuple[List[nn.Parameter], th.Tensor, th.Tensor, List[Tuple[int, ...]]]:
+    def _compute_policy_grad(self, policy_objective):
+        policy_objective.backward(retain_graph=True)
+        return get_flat_grads(self.policy, pred=is_actor)
+
+    def _compute_kl_grad(self, kl_div: th.Tensor):
         """
         Compute actor gradients for kl div and surrogate objectives.
 
@@ -176,17 +180,11 @@ class TRPO(OnPolicyAlgorithm):
         :return: List of actor params, gradients and gradients shape.
         """
         # This is necessary because not all the parameters in the policy have gradients w.r.t. the KL divergence
-        # The policy objective is also called surrogate objective
-        policy_objective_gradients = []
         # Contains the gradients of the KL divergence
         grad_kl = []
         # Contains the shape of the gradients of the KL divergence w.r.t each parameter
         # This way the flattened gradient can be reshaped back into the original shapes and applied to
         # the parameters
-        grad_shape = []
-        # Contains the parameters which have non-zeros KL divergence gradients
-        # The list is used during the line-search to apply the step to each parameters
-        actor_params = []
 
         for name, param in self.policy.named_parameters():
             # Skip parameters related to value function based on name
@@ -209,17 +207,14 @@ class TRPO(OnPolicyAlgorithm):
                 # If the parameter impacts the KL divergence (i.e. the policy)
                 # we compute the gradient of the policy objective w.r.t to the parameter
                 # this avoids computing the gradient if it's not going to be used in the conjugate gradient step
-                policy_objective_grad, *_ = th.autograd.grad(policy_objective, param, retain_graph=True, only_inputs=True)
-
-                grad_shape.append(kl_param_grad.shape)
+                # policy_objective_grad, *_ = th.autograd.grad(policy_objective, param, retain_graph=True, only_inputs=True)
                 grad_kl.append(kl_param_grad.reshape(-1))
-                policy_objective_gradients.append(policy_objective_grad.reshape(-1))
-                actor_params.append(param)
+                # policy_objective_gradients.append(
+                #     policy_objective_grad.reshape(-1))
 
         # Gradients are concatenated before the conjugate gradient step
-        policy_objective_gradients = th.cat(policy_objective_gradients)
         grad_kl = th.cat(grad_kl)
-        return actor_params, policy_objective_gradients, grad_kl, grad_shape
+        return grad_kl
 
     def train(self) -> None:
         """
@@ -258,14 +253,23 @@ class TRPO(OnPolicyAlgorithm):
             policy_objective, kl_div = obj_and_kl_fn(self.policy)
 
             # Surrogate & KL gradient
-            self.policy.optimizer.zero_grad()
+            actor_params = [param for name, param
+                            in self.policy.named_parameters()
+                            if is_actor(name)]
+            original_actor_params = get_flat_params(
+                self.policy, pred=is_actor).detach().clone()
 
-            actor_params, policy_objective_gradients, grad_kl, grad_shape = \
-                self._compute_actor_grad(kl_div, policy_objective)
+            self.policy.optimizer.zero_grad()
+            policy_objective_gradients = self._compute_policy_grad(
+                policy_objective)
+
+            # This zero gradding is a bit iffy
+            self.policy.optimizer.zero_grad()
+            grad_kl = self._compute_kl_grad(kl_div)
 
             # Hessian-vector dot product function used in the conjugate gradient step
-            hessian_vector_product_fn = partial(self.hessian_vector_product,
-                                                actor_params, grad_kl)
+            hessian_vector_product_fn = partial(
+                self.hessian_vector_product, actor_params, grad_kl)
 
             # Computing search direction
             search_direction = conjugate_gradient_solver(
@@ -281,23 +285,22 @@ class TRPO(OnPolicyAlgorithm):
                 hessian_vector_product_fn(search_direction, retain_graph=False)
             )
             line_search_max_step_size = th.sqrt(line_search_max_step_size)
-            original_actor_params = [param.detach().clone()
-                                     for param in actor_params]
 
             is_line_search_success = False
             with th.no_grad():
                 # Line-search (backtracking)
                 linesearch_obj_fn = self.get_linesearch_obj_fn(
-                    actor_params, original_actor_params, grad_shape,
-                    search_direction, obj_and_kl_fn)
+                    original_actor_params,
+                    search_direction,
+                    obj_and_kl_fn)
                 is_line_search_success, new_policy, new_obj, kl = self.linesearch(
                     linesearch_obj_fn, line_search_max_step_size)
                 line_search_results.append(is_line_search_success)
 
                 if not is_line_search_success:
                     # If the line-search wasn't successful we revert to the original parameters
-                    for param, original_param in zip(actor_params, original_actor_params):
-                        param.data = original_param.data.clone()
+                    set_flat_params(self.policy, original_actor_params,
+                                    pred=is_actor)
                     policy_objective_values.append(policy_objective.item())
                     kl_divergences.append(0)
                 else:
@@ -351,9 +354,8 @@ class TRPO(OnPolicyAlgorithm):
 
         return objective_and_kl_fn
 
-    def get_linesearch_obj_fn(self, actor_params: th.Tensor,
-                              original_params:th.Tensor,
-                              grad_shape: List,
+    def get_linesearch_obj_fn(self,
+                              actor_params: th.Tensor,
                               search_direction: th.Tensor,
                               obj_and_kl_fn: Callable) -> Callable:
         """
@@ -363,8 +365,11 @@ class TRPO(OnPolicyAlgorithm):
         def linesearch_obj_fn(coeff: float):
             "Return a tuple of policy, obj, constraint"
             flat_direction = coeff * search_direction
-            self.update_params(
-                actor_params, original_params, grad_shape, flat_direction)
+            set_flat_params(self.policy,
+                            actor_params + coeff * search_direction,
+                            pred=is_actor)
+            # self.update_params(
+            #     actor_params, original_params, grad_shape, flat_direction)
             obj, kl = obj_and_kl_fn(self.policy)
             return (self.policy, obj, kl)
         return linesearch_obj_fn
