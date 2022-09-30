@@ -2,9 +2,15 @@ import gym
 import numpy as np
 import torch as th
 from torch import nn
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Type, Union
 
 from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.torch_layers import (
+    BaseFeaturesExtractor,
+    FlattenExtractor,
+)
+from stable_baselines3.common.type_aliases import Schedule
+from sb3_contrib.tebpo.utils import get_flat_params
 
 
 class ActorCriticPolicyWithGradients(ActorCriticPolicy):
@@ -81,24 +87,20 @@ class ActorCriticPolicyWithGradients(ActorCriticPolicy):
             optimizer_kwargs
         )
 
-        # Instantiate new network (layer) for the gradients of the value function, with output dimension equal to the
-        # number of edges in the policy network
-        if type(self.net_arch) == dict:
-            num_policy_edges = self.net_arch['pi'].sum()
-        elif type(self.net_arch) == list:
-            if type(self.net_arch[-1]) == dict:
-                num_policy_edges = sum(self.net_arch[:-1]) + self.net_arch[-1]['pi'].sum()
-            else:
-                num_policy_edges = sum(self.net_arch)
-        else:
-            raise
-        self.value_net = nn.Linear(self.mlp_extractor.latent_dim_vf,
-                                   num_policy_edges + 1)
+        self.value_net = nn.Sequential(OrderedDict([
+            ("value_head",
+             nn.Linear(self.mlp_extractor.latent_dim_vf,
+                       self.n_actor_params + 1))
+        ]))
         # Init weights: use orthogonal initialization
         # with small initial weight for the output
 
         # Reinstantiate optimizer in order to pass on parameters from the value-gradient network
         self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+
+    @property
+    def n_actor_params(self):
+        return len(get_flat_params(self, pred=lambda name: "value" not in name))
 
     def predict_values_with_gradients(self, obs: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """
@@ -151,3 +153,12 @@ class ActorCriticPolicyWithGradients(ActorCriticPolicy):
         actions = actions.reshape((-1,) + self.action_space.shape)
 
         return actions, values, value_grads, log_prob
+
+    def filter_parameters(self, pred):
+        return [param for name, param in self.named_parameters() if pred(name)]
+
+    def get_actor_parameters(self):
+        return self.filter_parameters(lambda name: "value" not in name)
+
+    def get_critic_parameters(self):
+        return self.filter_parameters(lambda name: "value" in name)

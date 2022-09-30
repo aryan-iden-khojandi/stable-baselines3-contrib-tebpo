@@ -93,112 +93,43 @@ class TEBPO(TRPO):
             gae_lambda=self.gae_lambda,
             n_envs=self.n_envs)
 
-    @staticmethod
-    def compute_returns_and_advantage(buffer: RolloutBuffer,
-                                      last_values: np.ndarray,
-                                      weights: np.ndarray,
-                                      values: np.ndarray) -> np.ndarray:
-        "See documentation in stable_baselines3.buffers.RolloutBuffer"
-        # Convert to numpy
-        last_gae_lam = 0
-        advantages = np.zeros(buffer.buffer_size)
-        for step in reversed(range(buffer.buffer_size)):
-            if step == buffer.buffer_size - 1:
-                next_non_terminal = 1.0 - buffer.dones
-                next_values = buffer.last_values
-            else:
-                next_non_terminal = 1.0 - buffer.episode_starts[step + 1]
-                next_values = values[step + 1]
-            delta = (weights * buffer.rewards[step]
-                     + buffer.gamma * next_values * next_non_terminal
-                     - values[step])
-            last_gae_lam = (delta + buffer.gamma * buffer.gae_lambda
-                            * next_non_terminal * last_gae_lam)
-            advantages[step] = last_gae_lam
-        # TD(lambda) estimator, see Github PR #375 or "Telescoping in TD(lambda)"
-        # in David Silver Lecture 4: https://www.youtube.com/watch?v=PnHCvfgC_ZA
-        return advantages + values
+    def _compute_policy_grad(self, policy_objective):
+        termA = super(TEBPO, self)._compute_policy_grad(policy_objective)
+        termB = (self.rollout_buffer.advantages[:, 1:] *
+                 self.rollout_buffer.log_probs).sum(axis=0)
+        return termA + termB
 
-    def _compute_actor_grad(
-        self, kl_div: th.Tensor, policy_objective: th.Tensor
-    ) -> Tuple[List[nn.Parameter], th.Tensor,
-               th.Tensor, List[Tuple[int, ...]]]:
+    def get_objective_and_kl_fn(self, policy, data):
         """
-        Compute actor gradients for kl div and surrogate objectives.
-
-        :param kl_div: The KL divergence objective
-        :param policy_objective: The surrogate objective ("classic" policy gradient)
-        :return: List of actor params, gradients and gradients shape.
+        Returns a closure that accepts a policy, and returns the objective
+        value and KL divergence from the original policy.
         """
-        # This is necessary because not all the parameters in the policy
-        # have gradients w.r.t. the KL divergence
-        # The policy objective is also called surrogate objective
-        policy_objective_gradients = []
-        # Contains the gradients of the KL divergence
-        grad_kl = []
-        # Contains the shape of the gradients of the KL divergence w.r.t
-        # each parameter
-        # This way the flattened gradient can be reshaped back into the
-        # original shapes and applied to
-        # the parameters
-        grad_shape = []
-        # Contains the parameters which have non-zeros KL divergence
-        # gradients
-        # The list is used during the line-search to apply the step to
-        # each parameters
-        actor_params = []
+        advantages = data.advantages[:, 0]
+        if self.normalize_advantage:
+            advantages = (advantages - advantages.mean()) \
+                / (data.advantages.std() + 1e-8)
 
-        for name, param in self.policy.named_parameters():
-            # Skip parameters related to value function based on name
-            # this work for built-in policies only (not custom ones)
-            if "value" in name:
-                continue
+        with th.no_grad():
+            # Note: is copy enough, no need for deepcopy?
+            # If using gSDE and deepcopy, we need to use `old_distribution.distribution`
+            # directly to avoid PyTorch errors.
+            old_distribution = copy.copy(
+                policy.get_distribution(data.observations))
 
-            # For each parameter we compute the gradient of the KL
-            # divergence w.r.t to that parameter
-            kl_param_grad, *_ = th.autograd.grad(
-                kl_div,
-                param,
-                create_graph=True,
-                retain_graph=True,
-                allow_unused=True,
-                only_inputs=True,
-            )
-            # If the gradient is not zero (not None), we store the
-            # parameter in the actor_params list
-            # and add the gradient and its shape to grad_kl and
-            # grad_shape respectively
-            if kl_param_grad is not None:
-                # If the parameter impacts the KL divergence (i.e. the
-                # policy) we compute the gradient of the policy objective
-                # w.r.t to the parameter this avoids computing the
-                # gradient if it's not going to be used in the conjugate
-                # gradient step
-                policy_objective_grad_term_a, *_ = th.autograd.grad(
-                    policy_objective, param,
-                    retain_graph=True, only_inputs=True)
-                # TODO: Figure out the last state, dones
-                obs = self.rollout_buffer.get(batch_size=self.batch_size)
+        if isinstance(self.action_space, spaces.Discrete):
+            # Convert discrete action from float to long
+            actions = data.actions.long().flatten()
 
-                policy_objective_grad_term_b = \
-                    self.rollout_buffer.compute_returns_and_advantage(
-                        self.policy.forward_with_grads(
-                            obs=obs, deterministic=True
-                        )[2])
+        def objective_and_kl_fn(policy):
+            distribution = policy.get_distribution(data.observations)
+            log_prob = distribution.log_prob(actions)
+            ratio = th.exp(log_prob - data.old_log_prob)
+            kl_div = kl_divergence(distribution, old_distribution).mean()
+            obj = (advantages * ratio).mean()
+            return obj, kl_div
 
-                policy_objective_grad = (policy_objective_grad_term_a
-                                         + policy_objective_grad_term_b)
+        return objective_and_kl_fn
 
-                grad_shape.append(kl_param_grad.shape)
-                grad_kl.append(kl_param_grad.reshape(-1))
-                policy_objective_gradients.append(
-                    policy_objective_grad.reshape(-1))
-                actor_params.append(param)
-
-        # Gradients are concatenated before the conjugate gradient step
-        policy_objective_gradients = th.cat(policy_objective_gradients)
-        grad_kl = th.cat(grad_kl)
-        return (actor_params,
-                policy_objective_gradients,
-                grad_kl,
-                grad_shape)
+    def value_loss(self, data):
+        values_pred = self.policy.predict_values(data.observations)
+        return F.mse_loss(data.returns, values_pred)
