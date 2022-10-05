@@ -12,10 +12,62 @@ from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, RolloutBufferSamples, Schedule
 from torch import nn
 from torch.nn import functional as F
-from sb3_contrib.tebpo.tensor_buffer import ValueGradientRewardsRolloutBuffer
+from sb3_contrib.tebpo.tensor_buffer import ValueGradientRewardsRolloutBuffer, TensorRewardsRolloutBuffer
 
 from sb3_contrib.trpo.trpo import TRPO
 from sb3_contrib.tebpo.actor_critic_policy_with_gradients import ActorCriticPolicyWithGradients
+
+
+class TEBPO_MC(TRPO):
+    # policy_aliases: Dict[str, Type[BasePolicy]] = {
+    #     "MlpPolicy": ActorCriticPolicy,
+    #     # "CnnPolicy": ActorCriticCnnPolicy,
+    #     # "MultiInputPolicy": MultiInputActorCriticPolicy,
+    # }
+
+    def _setup_model(self):
+        super(TEBPO_MC, self)._setup_model()
+        self.rollout_buffer = TensorRewardsRolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            device=self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs)
+
+    def get_objective_and_kl_fn(self, policy, buffer):
+        """
+        Returns a closure that accepts a policy, and returns the objective
+        value and KL divergence from the original policy.
+        """
+        flat_obs = buffer.observations_th.view(
+            -1, buffer.observations_th.shape[-1])
+        flat_actions = buffer.actions_th.view(-1)
+        flat_log_probs = buffer.log_probs_th.view(-1)
+
+        with th.no_grad():
+            # Note: is copy enough, no need for deepcopy?
+            # If using gSDE and deepcopy, we need to use `old_distribution.distribution`
+            # directly to avoid PyTorch errors.
+            old_distribution = copy.copy(policy.get_distribution(flat_obs))
+
+        # if isinstance(self.action_space, spaces.Discrete):
+        #     # Convert discrete action from float to long
+        #     actions = buffer.actions.long().flatten()
+
+        def objective_and_kl_fn(policy):
+            distribution = policy.get_distribution(flat_obs)
+            log_prob = distribution.log_prob(flat_actions)
+            ratio = (th.exp(log_prob - flat_log_probs)
+                     .view(buffer.actions_th.shape))
+            advantages = (self.rollout_buffer
+                          ._compute_advantages(weights=ratio))
+            kl_div = kl_divergence(distribution, old_distribution).mean()
+            obj = (advantages * ratio).mean()
+            return obj, kl_div
+
+        return objective_and_kl_fn
 
 
 class TEBPO(TRPO):

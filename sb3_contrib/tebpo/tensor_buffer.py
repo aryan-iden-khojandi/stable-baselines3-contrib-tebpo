@@ -9,6 +9,7 @@ from gym import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.type_aliases import RolloutBufferSamples
 from stable_baselines3.common.vec_env import VecNormalize
+from torch_discounted_cumsum import discounted_cumsum_right
 
 from sb3_contrib.tebpo.actor_critic_policy_with_gradients import ActorCriticPolicyWithGradients
 from sb3_contrib.tebpo.utils import get_flat_grads
@@ -23,12 +24,13 @@ class TensorRewardsRolloutBuffer(RolloutBuffer):
                  buffer_size: int,
                  observation_space: spaces.Space,
                  action_space: spaces.Space,
-                 reward_shape: Tuple,
+                 reward_shape: Tuple=(1, ),
                  device: Union[th.device, str] = "auto",
                  gae_lambda: float = 1,
                  gamma: float = 0.99,
                  n_envs: int = 1):
         self.reward_shape = reward_shape
+
         super(TensorRewardsRolloutBuffer, self).__init__(
             buffer_size, observation_space, action_space,
             device=device, gae_lambda=gae_lambda, gamma=gamma,
@@ -64,7 +66,7 @@ class TensorRewardsRolloutBuffer(RolloutBuffer):
                         reward: np.ndarray,
                         log_prob: th.Tensor):
         "Turn one-dimensional reward into a reward of size reward_shape"
-        return reward
+        return reward.reshape((self.n_envs, *self.reward_shape))
 
     def add(
         self,
@@ -108,8 +110,34 @@ class TensorRewardsRolloutBuffer(RolloutBuffer):
         if self.pos == self.buffer_size:
             self.full = True
 
+    def compute_returns_and_advantage(self ,
+                                      last_values: th.Tensor=None,
+                                      dones: np.ndarray=None):
+        self.last_values = (last_values.clone()
+                            .view(1, self.n_envs, *self.reward_shape))
+        self.dones = self.to_torch(dones)
 
-    def compute_returns_and_advantage(self, last_values: th.Tensor, dones: np.ndarray) -> None:
+        # Convert everything to pytorch
+        self.observations_th = self.to_torch(self.observations)
+        self.actions_th = self.to_torch(self.actions)
+        self.rewards_th = self.to_torch(self.rewards)
+        self.returns_th = self.to_torch(self.returns)
+        self.episode_starts_th = self.to_torch(self.episode_starts)
+        self.values_th = self.to_torch(self.values)
+        self.log_probs_th = self.to_torch(self.log_probs)
+
+        # Compute
+        self.advantages = self._compute_advantages()
+        self.returns = (self.advantages + self.values).numpy()
+
+    def cat_envs(self, x: th.Tensor):
+        """
+        Reshapes from (n_envs, n_steps, *self.reward_shape) to
+        (n_envs * n_steps, *self.reward_shape)
+        """
+        return x.transpose(1, 0).reshape(-1, *self.reward_shape)
+
+    def _compute_advantages(self, weights: Optional[th.Tensor]=None) -> None:
         """
         Post-processing step: compute the lambda-return (TD(lambda) estimate)
         and GAE(lambda) advantage.
@@ -128,28 +156,43 @@ class TensorRewardsRolloutBuffer(RolloutBuffer):
         :param last_values: state value estimation for the last step (one for each env)
         :param dones: if the last step was a terminal step (one bool for each env).
         """
-        # Convert to numpy
-        last_values = last_values.clone().cpu().numpy()
+        weights = (th.ones_like(self.rewards_th)
+                   if weights is None else weights)
 
-        last_gae_lam = 0
-        for step in reversed(range(self.buffer_size)):
-            if step == self.buffer_size - 1:
-                next_non_terminal = 1.0 - dones
-                next_values = last_values
-            else:
-                next_non_terminal = 1.0 - self.episode_starts[step + 1]
-                next_values = self.values[step + 1]
-            next_non_terminal = next_non_terminal.reshape(-1, 1)
-            delta = (self.rewards[step]
-                     + self.gamma * next_values * next_non_terminal
-                     - self.values[step])
-            last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
-            self.advantages[step] = last_gae_lam
-        # TD(lambda) estimator, see Github PR #375 or "Telescoping in TD(lambda)"
-        # in David Silver Lecture 4: https://www.youtube.com/watch?v=PnHCvfgC_ZA
-        self.returns = self.advantages + self.values
-        self.last_values = last_values
-        self.dones = dones
+        rewards = self.cat_envs(self.rewards_th) * self.cat_envs(weights)
+        values = self.cat_envs(self.values_th.transpose(1, 0))
+        next_values = self.cat_envs(
+            th.vstack((self.values_th[1:, :], self.last_values)))
+        starts = th.vstack(
+            (th.ones(self.dones.shape), self.episode_starts_th[1:, :])
+        ).transpose(1, 0).reshape(-1)
+        dones = th.vstack(
+            (self.episode_starts_th[1:, :], self.dones)
+        ).transpose(1, 0).reshape(-1, 1)
+        deltas = rewards - values + self.gamma * next_values * (1 - dones)
+        deltas_by_ep = self.split_into_episodes(deltas, starts)
+        advantages = th.cat([
+            discounted_cumsum_right(delta.view(1, -1),
+                                    self.gamma * self.gae_lambda).view(-1)
+            for delta in deltas_by_ep
+            ])
+        return (advantages
+                .reshape(self.n_envs, -1, *self.reward_shape)
+                .transpose(1, 0))
+
+
+    @staticmethod
+    def split_into_episodes(x: th.Tensor, is_start: th.Tensor):
+        """
+        :param x: Tensor to split.
+        :param is_start: Binary tensor indicating whehther each element
+            is the start of an episode.
+        """
+        start_idx = th.cat((is_start.nonzero().view(-1),
+                            th.tensor([len(is_start)])))
+        chunk_sizes = start_idx[1:] - start_idx[:-1]
+        return th.split(x, tuple(chunk_sizes.numpy()), dim=0)
+
 
 
 class ValueGradientRewardsRolloutBuffer(TensorRewardsRolloutBuffer):
@@ -162,7 +205,6 @@ class ValueGradientRewardsRolloutBuffer(TensorRewardsRolloutBuffer):
                  gae_lambda: float = 1,
                  gamma: float = 0.99,
                  n_envs: int = 1):
-
         super(ValueGradientRewardsRolloutBuffer, self).__init__(
             buffer_size, observation_space, action_space,
             reward_shape=(policy.n_actor_params + 1, ),
