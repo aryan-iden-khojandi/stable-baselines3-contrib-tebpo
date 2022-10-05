@@ -19,12 +19,6 @@ from sb3_contrib.tebpo.actor_critic_policy_with_gradients import ActorCriticPoli
 
 
 class TEBPO_MC(TRPO):
-    # policy_aliases: Dict[str, Type[BasePolicy]] = {
-    #     "MlpPolicy": ActorCriticPolicy,
-    #     # "CnnPolicy": ActorCriticCnnPolicy,
-    #     # "MultiInputPolicy": MultiInputActorCriticPolicy,
-    # }
-
     def _setup_model(self):
         super(TEBPO_MC, self)._setup_model()
         self.rollout_buffer = TensorRewardsRolloutBuffer(
@@ -63,8 +57,14 @@ class TEBPO_MC(TRPO):
                      .view(buffer.log_probs_th.shape))
             advantages = (self.rollout_buffer
                           ._compute_advantages(weights=ratio))
+            Qs = advantages + self.rollout_buffer.values_th
             kl_div = kl_divergence(distribution, old_distribution).mean()
-            obj = (advantages.squeeze() * ratio).mean()
+            if self.normalize_advantage:
+                # Should we really have gradients through the normalizers? Seems to work best...
+                Qs = (Qs - Qs.mean()) \
+                    / (Qs.std() + 1e-8)
+            obj = (Qs.squeeze() * ratio).mean()
+            obj = ((ratio - self.gamma) * Qs.squeeze()).mean()
             return obj, kl_div
 
         return objective_and_kl_fn
