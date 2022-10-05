@@ -229,83 +229,76 @@ class TRPO(OnPolicyAlgorithm):
         kl_divergences = []
         line_search_results = []
 
+        # value_losses = self.update_critic(
+        #     [param for name, param in self.policy.named_parameters()
+        #      if "value" not in name])
         # This will only loop once (get all data in one go)
-        for rollout_data in self.rollout_buffer.get(batch_size=None):
+        # Re-sample the noise matrix because the log_std has changed
+        # if self.use_sde:
+        #     # batch_size is only used for the value function
+        #     self.policy.reset_noise(actions.shape[0])
 
-            # Optional: sub-sample data for faster computation
-            if self.sub_sampling_factor > 1:
-                rollout_data = RolloutBufferSamples(
-                    rollout_data.observations[:: self.sub_sampling_factor],
-                    rollout_data.actions[:: self.sub_sampling_factor],
-                    None,  # old values, not used here
-                    rollout_data.old_log_prob[:: self.sub_sampling_factor],
-                    rollout_data.advantages[:: self.sub_sampling_factor],
-                    None,  # returns, not used here
-                )
+        # KL divergence
+        obj_and_kl_fn = self.get_objective_and_kl_fn(
+            self.policy,
+            self.rollout_buffer)
+            # rollout_data)
+        policy_objective, kl_div = obj_and_kl_fn(self.policy)
 
-            # Re-sample the noise matrix because the log_std has changed
-            if self.use_sde:
-                # batch_size is only used for the value function
-                self.policy.reset_noise(actions.shape[0])
+        # Surrogate & KL gradient
+        actor_params = [param for name, param
+                        in self.policy.named_parameters()
+                        if is_actor(name)]
+        original_actor_params = get_flat_params(
+            self.policy, pred=is_actor).detach().clone()
 
-            # KL divergence
-            obj_and_kl_fn = self.get_objective_and_kl_fn(self.policy, rollout_data)
-            policy_objective, kl_div = obj_and_kl_fn(self.policy)
+        self.policy.optimizer.zero_grad()
+        policy_objective_gradients = self._compute_policy_grad(
+            policy_objective)
 
-            # Surrogate & KL gradient
-            actor_params = [param for name, param
-                            in self.policy.named_parameters()
-                            if is_actor(name)]
-            original_actor_params = get_flat_params(
-                self.policy, pred=is_actor).detach().clone()
+        # This zero gradding is a bit iffy
+        self.policy.optimizer.zero_grad()
+        grad_kl = self._compute_kl_grad(kl_div)
 
-            self.policy.optimizer.zero_grad()
-            policy_objective_gradients = self._compute_policy_grad(
-                policy_objective)
+        # Hessian-vector dot product function used in the conjugate gradient step
+        hessian_vector_product_fn = partial(
+            self.hessian_vector_product, actor_params, grad_kl)
 
-            # This zero gradding is a bit iffy
-            self.policy.optimizer.zero_grad()
-            grad_kl = self._compute_kl_grad(kl_div)
+        # Computing search direction
+        search_direction = conjugate_gradient_solver(
+            hessian_vector_product_fn,
+            policy_objective_gradients,
+            max_iter=self.cg_max_steps,
+        )
 
-            # Hessian-vector dot product function used in the conjugate gradient step
-            hessian_vector_product_fn = partial(
-                self.hessian_vector_product, actor_params, grad_kl)
+        # Maximal step length
+        line_search_max_step_size = 2 * self.target_kl
+        line_search_max_step_size /= th.matmul(
+            search_direction,
+            hessian_vector_product_fn(search_direction, retain_graph=False)
+        )
+        line_search_max_step_size = th.sqrt(line_search_max_step_size)
 
-            # Computing search direction
-            search_direction = conjugate_gradient_solver(
-                hessian_vector_product_fn,
-                policy_objective_gradients,
-                max_iter=self.cg_max_steps,
-            )
-
-            # Maximal step length
-            line_search_max_step_size = 2 * self.target_kl
-            line_search_max_step_size /= th.matmul(
+        is_line_search_success = False
+        with th.no_grad():
+            # Line-search (backtracking)
+            linesearch_obj_fn = self.get_linesearch_obj_fn(
+                original_actor_params,
                 search_direction,
-                hessian_vector_product_fn(search_direction, retain_graph=False)
-            )
-            line_search_max_step_size = th.sqrt(line_search_max_step_size)
+                obj_and_kl_fn)
+            is_line_search_success, new_policy, new_obj, kl = self.linesearch(
+                linesearch_obj_fn, line_search_max_step_size)
+            line_search_results.append(is_line_search_success)
 
-            is_line_search_success = False
-            with th.no_grad():
-                # Line-search (backtracking)
-                linesearch_obj_fn = self.get_linesearch_obj_fn(
-                    original_actor_params,
-                    search_direction,
-                    obj_and_kl_fn)
-                is_line_search_success, new_policy, new_obj, kl = self.linesearch(
-                    linesearch_obj_fn, line_search_max_step_size)
-                line_search_results.append(is_line_search_success)
-
-                if not is_line_search_success:
-                    # If the line-search wasn't successful we revert to the original parameters
-                    set_flat_params(self.policy, original_actor_params,
-                                    pred=is_actor)
-                    policy_objective_values.append(policy_objective.item())
-                    kl_divergences.append(0)
-                else:
-                    policy_objective_values.append(new_obj.item())
-                    kl_divergences.append(kl.item())
+            if not is_line_search_success:
+                # If the line-search wasn't successful we revert to the original parameters
+                set_flat_params(self.policy, original_actor_params,
+                                pred=is_actor)
+                policy_objective_values.append(policy_objective.item())
+                kl_divergences.append(0)
+            else:
+                policy_objective_values.append(new_obj.item())
+                kl_divergences.append(kl.item())
 
         value_losses = self.update_critic(actor_params)
         self._n_updates += 1
@@ -328,6 +321,20 @@ class TRPO(OnPolicyAlgorithm):
         Returns a closure that accepts a policy, and returns the objective
         value and KL divergence from the original policy.
         """
+
+        data = next(self.rollout_buffer.get(batch_size=None))
+
+        # Optional: sub-sample data for faster computation
+        if self.sub_sampling_factor > 1:
+            data = RolloutBufferSamples(
+                data.observations[:: self.sub_sampling_factor],
+                data.actions[:: self.sub_sampling_factor],
+                None,  # old values, not used here
+                data.old_log_prob[:: self.sub_sampling_factor],
+                data.advantages[:: self.sub_sampling_factor],
+                None,  # returns, not used here
+            )
+
         advantages = data.advantages
         if self.normalize_advantage:
             advantages = (advantages - advantages.mean()) \
