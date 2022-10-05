@@ -350,6 +350,8 @@ class TRPO(OnPolicyAlgorithm):
         if isinstance(self.action_space, spaces.Discrete):
             # Convert discrete action from float to long
             actions = data.actions.long().flatten()
+        else:
+            actions = data.actions
 
         def objective_and_kl_fn(policy):
             distribution = policy.get_distribution(data.observations)

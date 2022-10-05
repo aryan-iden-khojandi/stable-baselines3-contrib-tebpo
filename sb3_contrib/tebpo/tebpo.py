@@ -43,7 +43,7 @@ class TEBPO_MC(TRPO):
         """
         flat_obs = buffer.observations_th.view(
             -1, buffer.observations_th.shape[-1])
-        flat_actions = buffer.actions_th.view(-1)
+        flat_actions = buffer.actions_th.view(-1, buffer.actions.shape[-1])
         flat_log_probs = buffer.log_probs_th.view(-1)
 
         with th.no_grad():
@@ -52,19 +52,19 @@ class TEBPO_MC(TRPO):
             # directly to avoid PyTorch errors.
             old_distribution = copy.copy(policy.get_distribution(flat_obs))
 
-        # if isinstance(self.action_space, spaces.Discrete):
-        #     # Convert discrete action from float to long
-        #     actions = buffer.actions.long().flatten()
+        if isinstance(self.action_space, spaces.Discrete):
+            # Convert discrete action from float to long
+            flat_actions = buffer.actions_th.view(-1)
 
         def objective_and_kl_fn(policy):
             distribution = policy.get_distribution(flat_obs)
             log_prob = distribution.log_prob(flat_actions)
             ratio = (th.exp(log_prob - flat_log_probs)
-                     .view(buffer.actions_th.shape))
+                     .view(buffer.log_probs_th.shape))
             advantages = (self.rollout_buffer
                           ._compute_advantages(weights=ratio))
             kl_div = kl_divergence(distribution, old_distribution).mean()
-            obj = (advantages * ratio).mean()
+            obj = (advantages.squeeze() * ratio).mean()
             return obj, kl_div
 
         return objective_and_kl_fn
