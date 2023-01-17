@@ -286,8 +286,9 @@ class TRPO(OnPolicyAlgorithm):
                 original_actor_params,
                 search_direction,
                 obj_and_kl_fn)
-            is_line_search_success, new_policy, new_obj, kl = self.linesearch(
-                linesearch_obj_fn, line_search_max_step_size)
+            is_line_search_success, new_policy, new_obj, kl = \
+                self.linesearch(linesearch_obj_fn,
+                                line_search_max_step_size)
             line_search_results.append(is_line_search_success)
 
             if not is_line_search_success:
@@ -373,7 +374,6 @@ class TRPO(OnPolicyAlgorithm):
         """
         def linesearch_obj_fn(coeff: float):
             "Return a tuple of policy, obj, constraint"
-            flat_direction = coeff * search_direction
             set_flat_params(self.policy,
                             actor_params + coeff * search_direction,
                             pred=is_actor)

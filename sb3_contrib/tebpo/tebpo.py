@@ -58,13 +58,20 @@ class TEBPO_MC(TRPO):
             advantages = (self.rollout_buffer
                           ._compute_advantages(weights=ratio))
             Qs = advantages + self.rollout_buffer.values_th
+            # (ratio * Qs - self.gamma * Vnexts).sum()
+
             kl_div = kl_divergence(distribution, old_distribution).mean()
+            # if self.normalize_advantage:
+            #     # Should we really have gradients through the normalizers? Seems to work best...
+            #     advantages = (advantages - advantages.mean()) \
+            #         / (advantages.std() + 1e-8)
+            # obj = (advantages.squeeze() * ratio).mean()
+
             if self.normalize_advantage:
-                # Should we really have gradients through the normalizers? Seems to work best...
-                Qs = (Qs - Qs.mean()) \
-                    / (Qs.std() + 1e-8)
-            obj = (Qs.squeeze() * ratio).mean()
-            obj = ((ratio - self.gamma) * Qs.squeeze()).mean()
+                Qs = (Qs - Qs.detach().mean()) \
+                    / (Qs.detach().std() + 1e-8)
+            obj = ((ratio - self.gamma) * Qs.squeeze()
+                   - self.rollout_buffer.rewards_th.squeeze()).mean()
             return obj, kl_div
 
         return objective_and_kl_fn
