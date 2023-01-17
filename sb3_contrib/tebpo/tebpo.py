@@ -71,7 +71,7 @@ class TEBPO_MC(TRPO):
                 Qs = (Qs - Qs.detach().mean()) \
                     / (Qs.detach().std() + 1e-8)
             obj = ((ratio - self.gamma) * Qs.squeeze()
-                   - self.rollout_buffer.rewards_th.squeeze()).mean()
+                   + self.rollout_buffer.rewards_th.squeeze()).mean()
             return obj, kl_div
 
         return objective_and_kl_fn
