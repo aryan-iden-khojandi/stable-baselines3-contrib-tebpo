@@ -173,7 +173,8 @@ class TRPO(OnPolicyAlgorithm):
 
     def _compute_kl_grad(self, kl_div: th.Tensor):
         """
-        Compute actor gradients for kl div and surrogate objectives.
+        Compute actor gradients for kl div and surrogate objectives.  Edit: It does not compute gradients for the
+        surrogate objective, as this is handled in _compute_policy_grad(), right?
 
         :param kl_div: The KL divergence objective
         :param policy_objective: The surrogate objective ("classic" policy gradient)
@@ -252,7 +253,8 @@ class TRPO(OnPolicyAlgorithm):
         original_actor_params = get_flat_params(
             self.policy, pred=is_actor).detach().clone()
 
-        self.policy.optimizer.zero_grad()
+        self.policy.optimizer.zero_grad()  # We need to do this because otherwise, it will add the new gradients to the
+                                           # to the previous ones rather than replace the previous ones?
         policy_objective_gradients = self._compute_policy_grad(
             policy_objective)
 
@@ -286,6 +288,8 @@ class TRPO(OnPolicyAlgorithm):
                 original_actor_params,
                 search_direction,
                 obj_and_kl_fn)
+
+            # Note that this method mutates the self.policy by calling set_flat_params() within linesearch_obj_fn()
             is_line_search_success, new_policy, new_obj, kl = \
                 self.linesearch(linesearch_obj_fn,
                                 line_search_max_step_size)
@@ -324,6 +328,8 @@ class TRPO(OnPolicyAlgorithm):
         """
 
         data = next(self.rollout_buffer.get(batch_size=None))
+        # Do we need this, given that we pass self.rollout_buffer to the method
+        # (or, alternatively, do we need the "data" input, given that we overwrite it here)?
 
         # Optional: sub-sample data for faster computation
         if self.sub_sampling_factor > 1:
@@ -373,7 +379,7 @@ class TRPO(OnPolicyAlgorithm):
         original_params + search_direction * coeff
         """
         def linesearch_obj_fn(coeff: float):
-            "Return a tuple of policy, obj, constraint"
+            """Return a tuple of policy, objective, constraint"""
             set_flat_params(self.policy,
                             actor_params + coeff * search_direction,
                             pred=is_actor)
