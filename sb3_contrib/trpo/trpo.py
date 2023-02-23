@@ -307,9 +307,10 @@ class TRPO(OnPolicyAlgorithm):
 
         value_losses = self.update_critic(actor_params)
         self._n_updates += 1
+
         explained_var = explained_variance(
-            self.rollout_buffer.values.flatten(),
-            self.rollout_buffer.returns.flatten())
+            np.asarray(self.rollout_buffer.values.flatten()),
+            np.asarray(self.rollout_buffer.returns.flatten()))
 
         # Logs
         self.logger.record("train/policy_objective", np.mean(policy_objective_values))
