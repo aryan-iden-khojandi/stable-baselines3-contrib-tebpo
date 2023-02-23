@@ -10,7 +10,7 @@ from stable_baselines3.common.torch_layers import (
     FlattenExtractor,
 )
 from stable_baselines3.common.type_aliases import Schedule
-from sb3_contrib.tebpo.utils import get_flat_params
+from sb3_contrib.trpo.utils import get_flat_params
 
 
 class ActorCriticPolicyWithGradients(ActorCriticPolicy):

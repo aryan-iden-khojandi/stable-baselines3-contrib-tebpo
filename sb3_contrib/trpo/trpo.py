@@ -190,7 +190,7 @@ class TRPO(OnPolicyAlgorithm):
         for name, param in self.policy.named_parameters():
             # Skip parameters related to value function based on name
             # this work for built-in policies only (not custom ones)
-            if "value" in name:
+            if "value" in name:  # Note: This is rather brittle
                 continue
 
             # For each parameter we compute the gradient of the KL divergence w.r.t to that parameter
@@ -215,6 +215,7 @@ class TRPO(OnPolicyAlgorithm):
 
         # Gradients are concatenated before the conjugate gradient step
         grad_kl = th.cat(grad_kl)
+
         return grad_kl
 
     def train(self) -> None:
@@ -284,12 +285,13 @@ class TRPO(OnPolicyAlgorithm):
         is_line_search_success = False
         with th.no_grad():
             # Line-search (backtracking)
+            # Note that the returned method mutates self.policy by calling set_flat_params()
             linesearch_obj_fn = self.get_linesearch_obj_fn(
                 original_actor_params,
                 search_direction,
                 obj_and_kl_fn)
 
-            # Note that this method mutates the self.policy by calling set_flat_params() within linesearch_obj_fn()
+            # Note that this line mutates self.policy by calling set_flat_params() within linesearch_obj_fn()
             is_line_search_success, new_policy, new_obj, kl = \
                 self.linesearch(linesearch_obj_fn,
                                 line_search_max_step_size)
