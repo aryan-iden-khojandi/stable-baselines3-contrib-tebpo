@@ -1,4 +1,5 @@
 import copy
+import pickle
 import warnings
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, Callable
@@ -101,6 +102,8 @@ class TRPO(OnPolicyAlgorithm):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        init_policy_file: str = None,
+        fixed_policy_file: str = None
     ):
 
         super().__init__(
@@ -129,6 +132,17 @@ class TRPO(OnPolicyAlgorithm):
                 spaces.MultiBinary,
             ),
         )
+
+        if init_policy_file:
+            with open(init_policy_file, 'rb') as f:
+                self.init_policy = pickle.load(f)
+        else:
+            self.init_policy = None
+        if fixed_policy_file:
+            with open(fixed_policy_file, 'rb') as f:
+                self.fixed_policy = pickle.load(f)
+        else:
+            self.fixed_policy = None
 
         self.normalize_advantage = normalize_advantage
         # Sanity check, otherwise it will lead to noisy gradient and NaN
@@ -166,6 +180,9 @@ class TRPO(OnPolicyAlgorithm):
 
         if _init_setup_model:
             self._setup_model()
+
+        if self.init_policy:
+            set_flat_params(self.policy, get_flat_params(self.init_policy))
 
     def _compute_policy_grad(self, policy_objective):
         policy_objective.backward(retain_graph=True)
@@ -467,7 +484,7 @@ class TRPO(OnPolicyAlgorithm):
         reset_num_timesteps: bool = True,
     ) -> OnPolicyAlgorithm:
 
-        return super().learn(
+        model_to_return = super().learn(
             total_timesteps=total_timesteps,
             callback=callback,
             log_interval=log_interval,
@@ -478,3 +495,97 @@ class TRPO(OnPolicyAlgorithm):
             eval_log_path=eval_log_path,
             reset_num_timesteps=reset_num_timesteps,
         )
+
+        with open('/Users/aryan.iden.khojandi/repos/rl-baselines3-zoo-tebpo/saved_model_{}'.format(self.__class__.__name__), 'wb') as f:
+            pickle.dump(self.policy, f)
+
+        return model_to_return
+
+
+class TRPO_ANALYSIS(TRPO):
+
+    policy_aliases: Dict[str, Type[BasePolicy]] = {
+        "MlpPolicy": MlpPolicy,
+        "CnnPolicy": CnnPolicy,
+        "MultiInputPolicy": MultiInputPolicy,
+    }
+
+    def __init__(
+        self,
+        policy: Union[str, Type[ActorCriticPolicy]],
+        env: Union[GymEnv, str],
+        learning_rate: Union[float, Schedule] = 1e-3,
+        n_steps: int = 2048,
+        batch_size: int = 128,
+        gamma: float = 0.99,
+        cg_max_steps: int = 15,
+        cg_damping: float = 0.1,
+        line_search_shrinking_factor: float = 0.8,
+        line_search_max_iter: int = 10,
+        n_critic_updates: int = 10,
+        gae_lambda: float = 0.95,
+        use_sde: bool = False,
+        sde_sample_freq: int = -1,
+        normalize_advantage: bool = True,
+        target_kl: float = 0.01,
+        sub_sampling_factor: int = 1,
+        tensorboard_log: Optional[str] = None,
+        create_eval_env: bool = False,
+        policy_kwargs: Optional[Dict[str, Any]] = None,
+        verbose: int = 0,
+        seed: Optional[int] = None,
+        device: Union[th.device, str] = "auto",
+        _init_setup_model: bool = True,
+        init_policy_file: str = None,
+        fixed_policy_file: str = None
+    ):
+        super().__init__(
+            policy,
+            env,
+            learning_rate,
+            n_steps,
+            batch_size,
+            gamma,
+            cg_max_steps,
+            cg_damping,
+            line_search_shrinking_factor,
+            line_search_max_iter,
+            n_critic_updates,
+            gae_lambda,
+            use_sde,
+            sde_sample_freq,
+            normalize_advantage,
+            target_kl,
+            sub_sampling_factor,
+            tensorboard_log,
+            create_eval_env,
+            policy_kwargs,
+            verbose,
+            seed,
+            device,
+            _init_setup_model,
+            init_policy_file,
+            fixed_policy_file
+        )
+
+    def train(self) -> None:
+        """
+        Log surrogate-objective values using the currently gathered rollout buffer, on a fixed policy (i.e. without
+        updating the policy).
+        """
+
+        # KL divergence
+        obj_and_kl_fn = self.get_objective_and_kl_fn(
+            self.init_policy,
+            self.rollout_buffer)
+            # rollout_data)
+        policy_objective, kl_div = obj_and_kl_fn(self.fixed_policy)
+
+        set_flat_params(self.policy, get_flat_params(self.fixed_policy))
+
+        # Logs
+        self.logger.record("train/policy_objective", policy_objective.item())
+        self.logger.record("train/kl_divergence_loss", kl_div)
+        if hasattr(self.policy, "log_std"):
+            self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")

@@ -5,7 +5,7 @@ from sb3_contrib.ppo_mask import MaskablePPO
 from sb3_contrib.ppo_recurrent import RecurrentPPO
 from sb3_contrib.qrdqn import QRDQN
 from sb3_contrib.tqc import TQC
-from sb3_contrib.trpo import TRPO
+from sb3_contrib.trpo import TRPO, TRPO_ANALYSIS
 from sb3_contrib.tebpo import TEBPO, TEBPO_MC
 
 # Read version from file

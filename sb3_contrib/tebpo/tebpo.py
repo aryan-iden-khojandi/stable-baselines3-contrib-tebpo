@@ -14,7 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 from sb3_contrib.tebpo.tensor_buffer import ValueGradientRewardsRolloutBuffer, TensorRewardsRolloutBuffer
 
-from sb3_contrib.trpo.trpo import TRPO
+from sb3_contrib.trpo.trpo import TRPO, TRPO_ANALYSIS
 from sb3_contrib.tebpo.actor_critic_policy_with_gradients import ActorCriticPolicyWithGradients
 
 
@@ -192,3 +192,17 @@ class TEBPO(TRPO):
     def value_loss(self, data):
         values_pred = self.policy.predict_values(data.observations)
         return F.mse_loss(data.returns, values_pred)
+
+
+class TEBPO_MC_ANALYSIS(TRPO_ANALYSIS):
+    def _setup_model(self):
+        super(TEBPO_MC_ANALYSIS, self)._setup_model()
+        self.rollout_buffer = TensorRewardsRolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            device=self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs)
+
