@@ -195,6 +195,7 @@ class TEBPO(TRPO):
 
 
 class TEBPO_MC_ANALYSIS(TRPO_ANALYSIS):
+
     def _setup_model(self):
         super(TEBPO_MC_ANALYSIS, self)._setup_model()
         self.rollout_buffer = TensorRewardsRolloutBuffer(
@@ -205,4 +206,5 @@ class TEBPO_MC_ANALYSIS(TRPO_ANALYSIS):
             gamma=self.gamma,
             gae_lambda=self.gae_lambda,
             n_envs=self.n_envs)
+
 
