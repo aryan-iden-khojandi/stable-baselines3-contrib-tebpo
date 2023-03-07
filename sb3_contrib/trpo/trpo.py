@@ -136,13 +136,17 @@ class TRPO(OnPolicyAlgorithm):
         if init_policy_file:
             with open(init_policy_file, 'rb') as f:
                 self.init_policy = pickle.load(f)
+                print("Found and read init policy.")
         else:
             self.init_policy = None
+            print("Did not find and read init policy.")
         if fixed_policy_file:
             with open(fixed_policy_file, 'rb') as f:
                 self.fixed_policy = pickle.load(f)
+                print("Found and read fixed policy.")
         else:
             self.fixed_policy = None
+            print("Did not find and read fixed policy.")
 
         self.normalize_advantage = normalize_advantage
         # Sanity check, otherwise it will lead to noisy gradient and NaN
@@ -496,7 +500,7 @@ class TRPO(OnPolicyAlgorithm):
             reset_num_timesteps=reset_num_timesteps,
         )
 
-        with open('/Users/aryan.iden.khojandi/repos/rl-baselines3-zoo-tebpo/saved_model_{}'.format(self.__class__.__name__), 'wb') as f:
+        with open('/Users/aryan.iden.khojandi/repos/rl-baselines3-zoo-tebpo/saved_models/saved_model_{}'.format(self.__class__.__name__), 'wb') as f:
             pickle.dump(self.policy, f)
 
         return model_to_return
@@ -567,6 +571,8 @@ class TRPO_ANALYSIS(TRPO):
             init_policy_file,
             fixed_policy_file
         )
+
+        self.normalize_advantage = False
 
     def train(self) -> None:
         """
