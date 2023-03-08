@@ -345,15 +345,13 @@ class TRPO(OnPolicyAlgorithm):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
 
-    def get_objective_and_kl_fn(self, policy, data):
+    def get_objective_and_kl_fn(self, policy, data_source):
         """
         Returns a closure that accepts a policy, and returns the objective
         value and KL divergence from the original policy.
         """
 
-        data = next(self.rollout_buffer.get(batch_size=None))
-        # Do we need this, given that we pass self.rollout_buffer to the method
-        # (or, alternatively, do we need the "data" input, given that we overwrite it here)?
+        data = next(data_source.get(batch_size=None))
 
         # Optional: sub-sample data for faster computation
         if self.sub_sampling_factor > 1:
@@ -579,10 +577,9 @@ class TRPO_ANALYSIS(TRPO):
         Log surrogate-objective values using the currently gathered rollout buffer, on a fixed policy (i.e. without
         updating the policy).
         """
-
         # KL divergence
         obj_and_kl_fn = self.get_objective_and_kl_fn(
-            self.init_policy,
+            self.policy,
             self.rollout_buffer)
             # rollout_data)
         policy_objective, kl_div = obj_and_kl_fn(self.fixed_policy)
