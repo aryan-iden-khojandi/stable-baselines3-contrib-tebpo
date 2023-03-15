@@ -402,7 +402,9 @@ class TRPO(OnPolicyAlgorithm):
             log_prob = distribution.log_prob(actions)
             ratio = th.exp(log_prob - data.old_log_prob)
             kl_div = kl_divergence(distribution, old_distribution).mean()
-            obj = (advantages * ratio).mean()
+            # obj = (advantages * ratio).mean()
+            obj = ((ratio - 1.0) * advantages).mean()
+
             return obj, kl_div
 
         return objective_and_kl_fn
