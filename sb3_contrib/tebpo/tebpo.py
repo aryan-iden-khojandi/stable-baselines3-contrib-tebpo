@@ -70,7 +70,7 @@ class TEBPO_MC(TRPO):
             if self.normalize_advantage:
                 Qs = (Qs - Qs.detach().mean()) \
                     / (Qs.detach().std() + 1e-8)
-            obj = ((ratio - self.gamma) * Qs.squeeze()
+            obj = (self.gamma * (ratio - 1.0) * Qs.squeeze()
                    + self.rollout_buffer.rewards_th.squeeze()).mean()
             return obj, kl_div
 

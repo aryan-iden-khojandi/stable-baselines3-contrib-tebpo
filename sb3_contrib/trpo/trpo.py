@@ -1,5 +1,6 @@
 import copy
 import pickle
+import os, time, csv
 import warnings
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, Callable
@@ -103,7 +104,8 @@ class TRPO(OnPolicyAlgorithm):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
         init_policy_file: str = None,
-        fixed_policy_file: str = None
+        fixed_policy_file: str = None,
+        experiment_index: int = None
     ):
 
         super().__init__(
@@ -187,6 +189,19 @@ class TRPO(OnPolicyAlgorithm):
 
         if self.init_policy:
             set_flat_params(self.policy, get_flat_params(self.init_policy))
+
+        if self.init_policy and self.fixed_policy:
+            self.conv_combo_lambda = 0.001
+            self.mixed_policy = copy.copy(self.init_policy)
+            mixed_policy_params = self.conv_combo_lambda * get_flat_params(self.init_policy) + \
+                (1.0 - self.conv_combo_lambda) * get_flat_params(self.fixed_policy)
+            set_flat_params(self.mixed_policy, mixed_policy_params)
+
+            with open('/Users/aryan.iden.khojandi/repos/rl-baselines3-zoo-tebpo/saved_models/saved_mixed_model_{}'.format(
+                    self.__class__.__name__), 'wb') as f:
+                pickle.dump(self.mixed_policy, f)
+
+        self.experiment_index = experiment_index
 
     def _compute_policy_grad(self, policy_objective):
         policy_objective.backward(retain_graph=True)
@@ -539,7 +554,8 @@ class TRPO_ANALYSIS(TRPO):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
         init_policy_file: str = None,
-        fixed_policy_file: str = None
+        fixed_policy_file: str = None,
+        experiment_index: int = None
     ):
         super().__init__(
             policy,
@@ -567,7 +583,8 @@ class TRPO_ANALYSIS(TRPO):
             device,
             _init_setup_model,
             init_policy_file,
-            fixed_policy_file
+            fixed_policy_file,
+            experiment_index
         )
 
         self.normalize_advantage = False
@@ -588,6 +605,16 @@ class TRPO_ANALYSIS(TRPO):
 
         # Logs
         self.logger.record("train/policy_objective", policy_objective.item())
+
+        if self.experiment_index is not None:
+            filename = "experimental_results/{exp_idx}/{model_name}_{timestamp}".format(exp_idx=self.experiment_index,
+                                                                   model_name=self.__class__.__name__,
+                                                                   timestamp=time.time())
+            with open(filename, 'w') as f:
+                writer = csv.writer(f, delimiter=',')
+                row = ['policy_objective', policy_objective.item()]
+                writer.writerow(row)
+
         self.logger.record("train/kl_divergence_loss", kl_div)
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
