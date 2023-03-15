@@ -513,7 +513,7 @@ class TRPO(OnPolicyAlgorithm):
             reset_num_timesteps=reset_num_timesteps,
         )
 
-        with open('/Users/aryan.iden.khojandi/repos/rl-baselines3-zoo-tebpo/saved_models/saved_model_{}'.format(self.__class__.__name__), 'wb') as f:
+        with open('saved_models/saved_model_{}'.format(self.__class__.__name__), 'wb') as f:
             pickle.dump(self.policy, f)
 
         return model_to_return
