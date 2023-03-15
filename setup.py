@@ -66,6 +66,7 @@ setup(
     package_data={"sb3_contrib": ["py.typed", "version.txt"]},
     install_requires=[
         "stable_baselines3>=1.6.1a2",
+        "torch_discounted_cumsum",  # Fixed version due to breaking changes in 0.22
         "funcy"
     ],
     description="Contrib package of Stable Baselines3, experimental code.",
