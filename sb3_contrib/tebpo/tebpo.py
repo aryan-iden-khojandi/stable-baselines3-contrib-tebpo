@@ -50,6 +50,18 @@ class TEBPO_MC(TRPO):
             # Convert discrete action from float to long
             flat_actions = buffer.actions_th.view(-1)
 
+        episode_idx = (
+            buffer.episode_starts_th[:-1, :]
+            .transpose(0, 1)
+            .flatten()
+            .cumsum(0)
+        ).to(th.int64) - 1
+
+        # This has probably been computed somwhere already...
+        episode_returns = th.zeros(int(episode_idx.max()) + 1)
+        episode_returns.scatter_add_(0, episode_idx, buffer.rewards_th.transpose(0, 1).flatten())
+        mean_return = episode_returns.mean()
+
         def objective_and_kl_fn(policy):
             distribution = policy.get_distribution(flat_obs)
             log_prob = distribution.log_prob(flat_actions)
@@ -57,7 +69,7 @@ class TEBPO_MC(TRPO):
                      .view(buffer.log_probs_th.shape))
             advantages = (self.rollout_buffer
                           ._compute_advantages(weights=ratio))
-            Qs = advantages + self.rollout_buffer.values_th
+            Qs = (advantages + self.rollout_buffer.values_th).squeeze()
             # (ratio * Qs - self.gamma * Vnexts).sum()
 
             kl_div = kl_divergence(distribution, old_distribution).mean()
@@ -70,8 +82,19 @@ class TEBPO_MC(TRPO):
             if self.normalize_advantage:
                 Qs = (Qs - Qs.detach().mean()) \
                     / (Qs.detach().std() + 1e-8)
-            obj = (self.gamma * (ratio - 1.0) * Qs.squeeze()
-                   + self.rollout_buffer.rewards_th.squeeze()).mean()
+            # obj_terms = (self.gamma * (ratio - 1.0) * Qs.squeeze()
+            #              + buffer.rewards_th.squeeze())
+            is_episode_end = 1 - buffer.episode_starts_th[1:, :]
+            future_rewards = Qs[1:, :] * is_episode_end
+            obj_terms = (ratio[:-1, :] * (buffer.rewards_th.squeeze()[:-1, :] + future_rewards)
+                         - future_rewards)
+
+            episode_sums = th.zeros(int(episode_idx.max()) + 1)
+            episode_sums.scatter_add_(0, episode_idx, obj_terms.transpose(0, 1).flatten())
+
+            obj = episode_sums.mean() - mean_return
+            # todo: subtract baseline, fix issue with Qs being nonintegral?
+
             return obj, kl_div
 
         return objective_and_kl_fn
