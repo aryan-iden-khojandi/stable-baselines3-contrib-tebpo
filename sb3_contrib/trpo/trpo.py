@@ -105,7 +105,8 @@ class TRPO(OnPolicyAlgorithm):
         _init_setup_model: bool = True,
         init_policy_file: str = None,
         fixed_policy_file: str = None,
-        experiment_index: int = None
+        experiment_index: int = None,
+        model_save_path: str = None,
     ):
 
         super().__init__(
@@ -134,6 +135,8 @@ class TRPO(OnPolicyAlgorithm):
                 spaces.MultiBinary,
             ),
         )
+
+        self.model_save_path = model_save_path
 
         if init_policy_file:
             with open(init_policy_file, 'rb') as f:
@@ -540,8 +543,9 @@ class TRPO(OnPolicyAlgorithm):
             reset_num_timesteps=reset_num_timesteps,
         )
 
-        with open('saved_models/saved_model_{}'.format(self.__class__.__name__), 'wb') as f:
-            pickle.dump(self.policy, f)
+        if self.model_save_path is not None:
+            with open(self.model_save_path, 'wb') as f:
+                pickle.dump(self.policy, f)
 
         return model_to_return
 
