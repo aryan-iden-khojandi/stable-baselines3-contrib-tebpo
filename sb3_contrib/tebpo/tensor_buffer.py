@@ -160,7 +160,7 @@ class TensorRewardsRolloutBuffer(RolloutBuffer):
                    if weights is None else weights)
 
         rewards = self.cat_envs(self.rewards_th) * self.cat_envs(weights)
-        values = self.cat_envs(self.values_th.transpose(1, 0))
+        values = self.cat_envs(self.values_th)
         next_values = self.cat_envs(
             th.vstack((self.values_th[1:, :], self.last_values)))
         starts = th.vstack(
