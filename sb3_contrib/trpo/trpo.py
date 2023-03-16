@@ -193,17 +193,6 @@ class TRPO(OnPolicyAlgorithm):
         if self.init_policy:
             set_flat_params(self.policy, get_flat_params(self.init_policy))
 
-        if self.init_policy and self.fixed_policy:
-            self.conv_combo_lambda = 0.001
-            self.mixed_policy = copy.copy(self.init_policy)
-            mixed_policy_params = self.conv_combo_lambda * get_flat_params(self.init_policy) + \
-                (1.0 - self.conv_combo_lambda) * get_flat_params(self.fixed_policy)
-            set_flat_params(self.mixed_policy, mixed_policy_params)
-
-            with open('/Users/aryan.iden.khojandi/repos/rl-baselines3-zoo-tebpo/saved_models/saved_mixed_model_{}'.format(
-                    self.__class__.__name__), 'wb') as f:
-                pickle.dump(self.mixed_policy, f)
-
         self.experiment_index = experiment_index
 
     def _compute_policy_grad(self, policy_objective):
