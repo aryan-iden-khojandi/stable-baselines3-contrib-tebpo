@@ -158,11 +158,14 @@ class TEBPO(TRPO):
                  self.rollout_buffer.log_probs).sum(axis=0)
         return termA + termB
 
-    def get_objective_and_kl_fn(self, policy, data):
+    def get_objective_and_kl_fn(self, policy, data_source):
         """
         Returns a closure that accepts a policy, and returns the objective
         value and KL divergence from the original policy.
         """
+
+        data = next(data_source.get(batch_size=None))
+
         advantages = data.advantages[:, 0]
         if self.normalize_advantage:
             advantages = (advantages - advantages.mean()) \

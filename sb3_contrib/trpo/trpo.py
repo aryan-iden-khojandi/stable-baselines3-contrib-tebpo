@@ -403,7 +403,32 @@ class TRPO(OnPolicyAlgorithm):
             ratio = th.exp(log_prob - data.old_log_prob)
             kl_div = kl_divergence(distribution, old_distribution).mean()
             # obj = (advantages * ratio).mean()
-            obj = ((ratio - 1.0) * advantages).mean()
+            advantages_with_importance = ((ratio - 1.0) * advantages).reshape(data_source.n_envs, -1)
+
+            ep_starts = data_source.episode_starts
+            ep_starts_t = ep_starts.transpose()
+            data_source.episode_starts.transpose()
+            ep_start_indices_by_env = [
+                np.array([j for j, _ in enumerate(ep_starts_for_env)
+                          if _ == 1])
+                for i, ep_starts_for_env in enumerate(ep_starts_t)
+            ]
+
+            env_contributions_to_objective = []
+            for env_idx, ep_starts_for_env in enumerate(ep_start_indices_by_env):
+                episode_rewards_this_env = th.zeros((len(ep_starts_for_env), 1))
+                for i in range(len(ep_starts_for_env)):
+                    if i == len(ep_starts_for_env) - 1:
+                        episode_rewards_this_env[i] = sum(advantages_with_importance[env_idx][ep_starts_for_env[i]:])
+                    else:
+                        episode_rewards_this_env[i] = sum(advantages_with_importance[env_idx][
+                                                      ep_starts_for_env[i]:ep_starts_for_env[i+1]])
+                env_contributions_to_objective.append(episode_rewards_this_env)
+
+            all_contributions_to_objective = [total_reward for _ in env_contributions_to_objective
+                                              for total_reward in _]
+
+            obj = sum(all_contributions_to_objective) / len(all_contributions_to_objective)
 
             return obj, kl_div
 
