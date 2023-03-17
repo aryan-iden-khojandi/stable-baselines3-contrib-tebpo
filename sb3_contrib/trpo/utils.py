@@ -1,6 +1,7 @@
 import funcy as f
 import numpy as np
 import torch as th
+import torch.nn.functional as F
 
 
 def get_flat_grads(model, pred=f.constantly(True)):
@@ -36,3 +37,13 @@ def set_flat_params(model, flat_params, pred=f.constantly(True)):
                 .view(param.size()))
             prev_ind += flat_size
     return model
+
+
+def discounted_cumsum(x: th.Tensor, gamma: float):
+    """
+    x is expected to be one dimensional
+    """
+    x_pad = F.pad(x.view(1, 1, -1),
+                 (0, len(x) - 1), "constant", 0.)
+    weights = (gamma ** th.arange(len(x), dtype=x.dtype)).view(1, 1, -1)
+    return th.nn.functional.conv1d(x_pad, weights).view(-1)

@@ -9,10 +9,10 @@ from gym import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.type_aliases import RolloutBufferSamples
 from stable_baselines3.common.vec_env import VecNormalize
-from torch_discounted_cumsum import discounted_cumsum_right
 
 from sb3_contrib.tebpo.actor_critic_policy_with_gradients import ActorCriticPolicyWithGradients
-from sb3_contrib.trpo.utils import get_flat_grads
+from sb3_contrib.trpo.utils import get_flat_grads, discounted_cumsum
+
 
 class TensorRewardsRolloutBuffer(RolloutBuffer):
     """
@@ -172,8 +172,7 @@ class TensorRewardsRolloutBuffer(RolloutBuffer):
         deltas = rewards - values + self.gamma * next_values * (1 - dones)
         deltas_by_ep = self.split_into_episodes(deltas, starts)
         advantages = th.cat([
-            discounted_cumsum_right(delta.view(1, -1),
-                                    self.gamma * self.gae_lambda).view(-1)
+            discounted_cumsum(delta, self.gamma * self.gae_lambda)
             for delta in deltas_by_ep
             ])
         return (advantages
