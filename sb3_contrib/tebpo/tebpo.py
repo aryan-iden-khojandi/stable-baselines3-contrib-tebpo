@@ -55,7 +55,8 @@ class TEBPO_MC(TRPO):
             .transpose(0, 1)
             .flatten()
             .cumsum(0)
-        ).to(th.int64) - 1
+        ).to(th.int64)
+        episode_idx = episode_idx - episode_idx[0]
 
         # This has probably been computed somwhere already...
         episode_returns = th.zeros(int(episode_idx.max()) + 1)
